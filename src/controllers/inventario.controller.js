@@ -34,36 +34,46 @@ const registrarEntrada = async (req, res, next) => {
   }
 };
 
-// 📤 SALIDA
+// 📤 SALIDA (CORREGIDA)
 const registrarSalida = async (req, res, next) => {
   const client = await pool.connect();
 
   try {
-    const { codigo_color, cantidad } = req.body;
+    const { codigo_color, cantidad, id_almacen } = req.body;
 
     await client.query("BEGIN");
 
+    // 🔍 Buscar cajas SOLO del almacén seleccionado
     const cajas = await client.query(
       `SELECT id FROM cajas 
-       WHERE codigo_color = $1 AND estado = 'DISPONIBLE'
-       LIMIT $2`,
-      [codigo_color, cantidad],
+       WHERE codigo_color = $1 
+       AND id_almacen = $2
+       AND estado = 'DISPONIBLE'
+       LIMIT $3`,
+      [codigo_color, id_almacen, cantidad],
     );
 
     if (cajas.rows.length < cantidad) {
-      return res.status(400).json({ error: "Stock insuficiente" });
+      return res.status(400).json({
+        error: "Stock insuficiente en este almacén",
+      });
     }
 
+    // 🔄 Marcar cajas como retiradas
     for (let caja of cajas.rows) {
-      await client.query(`UPDATE cajas SET estado = 'RETIRADO' WHERE id = $1`, [
-        caja.id,
-      ]);
+      await client.query(
+        `UPDATE cajas 
+         SET estado = 'RETIRADO' 
+         WHERE id = $1`,
+        [caja.id],
+      );
     }
 
+    // 📝 Registrar movimiento CON almacén
     await client.query(
-      `INSERT INTO movimientos (tipo, codigo_color, cantidad)
-       VALUES ('SALIDA', $1, $2)`,
-      [codigo_color, cantidad],
+      `INSERT INTO movimientos (tipo, codigo_color, cantidad, id_almacen)
+       VALUES ('SALIDA', $1, $2, $3)`,
+      [codigo_color, cantidad, id_almacen],
     );
 
     await client.query("COMMIT");
@@ -130,12 +140,20 @@ const buscarCajas = async (req, res, next) => {
   }
 };
 
-// 📜 HISTORIAL
+// 📜 HISTORIAL (MEJORADO)
 const historialMovimientos = async (req, res, next) => {
   try {
     const result = await pool.query(`
-      SELECT * FROM movimientos
-      ORDER BY fecha DESC
+      SELECT 
+        m.id,
+        m.tipo,
+        m.codigo_color,
+        m.cantidad,
+        m.fecha,
+        a.nombre AS almacen
+      FROM movimientos m
+      LEFT JOIN almacenes a ON m.id_almacen = a.id
+      ORDER BY m.fecha DESC
     `);
 
     res.json(result.rows);
