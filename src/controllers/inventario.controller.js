@@ -1,6 +1,8 @@
 const pool = require("../db");
+const { v4: uuidv4 } = require("uuid");
+const QRCode = require("qrcode");
 
-// 📥 ENTRADA
+// ENTRADA
 const registrarEntrada = async (req, res, next) => {
   const client = await pool.connect();
 
@@ -8,13 +10,28 @@ const registrarEntrada = async (req, res, next) => {
     const { codigo_color, color, cantidad, id_almacen } = req.body;
 
     await client.query("BEGIN");
+    let qrCodes = [];
 
     for (let i = 0; i < cantidad; i++) {
-      await client.query(
-        `INSERT INTO cajas (codigo_color, color, id_almacen)
-         VALUES ($1, $2, $3)`,
-        [codigo_color, color, id_almacen],
+      const codigo_unico = uuidv4(); // Generar un código único para cada caja
+
+      const result = await client.query(
+        `INSERT INTO cajas (codigo_color, color, id_almacen, codigo_unico)
+         VALUES ($1, $2, $3, $4)
+         RETURNING id, codigo_unico`,
+        [codigo_color, color, id_almacen, codigo_unico],
       );
+
+      const caja = result.rows[0];
+
+      // Generar QR (solo con codigo_unico)
+      const qrImage = await QRCode.toDataURL(caja.codigo_unico);
+
+      qrCodes.push({
+        id: caja.id,
+        codigo_unico: caja.codigo_unico,
+        qr: qrImage,
+      });
     }
 
     await client.query(
@@ -25,7 +42,10 @@ const registrarEntrada = async (req, res, next) => {
 
     await client.query("COMMIT");
 
-    res.json({ mensaje: "Entrada registrada correctamente" });
+    res.json({
+      mensaje: "Entrada registrada correctamente",
+      qrCodes,
+    });
   } catch (error) {
     await client.query("ROLLBACK");
     next(error);
@@ -34,7 +54,7 @@ const registrarEntrada = async (req, res, next) => {
   }
 };
 
-// 📤 SALIDA (CORREGIDA)
+// SALIDA (CORREGIDA)
 const registrarSalida = async (req, res, next) => {
   const client = await pool.connect();
 
@@ -69,7 +89,7 @@ const registrarSalida = async (req, res, next) => {
       );
     }
 
-    // 📝 Registrar movimiento CON almacén
+    // Registrar movimiento CON almacén
     await client.query(
       `INSERT INTO movimientos (tipo, codigo_color, cantidad, id_almacen)
        VALUES ('SALIDA', $1, $2, $3)`,
@@ -87,7 +107,7 @@ const registrarSalida = async (req, res, next) => {
   }
 };
 
-// 📊 INVENTARIO
+// INVENTARIO
 const inventarioResumen = async (req, res, next) => {
   try {
     const result = await pool.query(`
@@ -108,7 +128,7 @@ const inventarioResumen = async (req, res, next) => {
   }
 };
 
-// 🔍 BUSCAR
+// BUSCAR
 const buscarCajas = async (req, res, next) => {
   try {
     const { codigo, color } = req.query;
@@ -140,7 +160,7 @@ const buscarCajas = async (req, res, next) => {
   }
 };
 
-// 📜 HISTORIAL (MEJORADO)
+// HISTORIAL (MEJORADO)
 const historialMovimientos = async (req, res, next) => {
   try {
     const result = await pool.query(`
@@ -162,10 +182,168 @@ const historialMovimientos = async (req, res, next) => {
   }
 };
 
+const escanearQR = async (req, res, next) => {
+  try {
+    const { codigo_unico } = req.body;
+
+    if (!codigo_unico) {
+      return res.status(400).json({ error: "codigo_unico requerido" });
+    }
+
+    const result = await pool.query(
+      `SELECT 
+        c.id,
+        c.codigo_color,
+        c.color,
+        c.estado,
+        c.codigo_unico,
+        a.nombre AS almacen
+      FROM cajas c
+      LEFT JOIN almacenes a ON c.id_almacen = a.id
+      WHERE c.codigo_unico = $1`,
+      [codigo_unico],
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: "Caja no encontrada" });
+    }
+
+    res.json(result.rows[0]);
+  } catch (error) {
+    next(error);
+  }
+};
+
+const salidaPorQR = async (req, res, next) => {
+  const client = await pool.connect();
+
+  try {
+    const { codigo_unico } = req.body;
+
+    if (!codigo_unico) {
+      return res.status(400).json({ error: "codigo_unico requerido" });
+    }
+
+    await client.query("BEGIN");
+
+    // Buscar la caja
+    const result = await client.query(
+      `SELECT * FROM cajas WHERE codigo_unico = $1`,
+      [codigo_unico],
+    );
+
+    if (result.rows.length === 0) {
+      await client.query("ROLLBACK");
+      return res.status(404).json({ error: "Caja no encontrada" });
+    }
+
+    const caja = result.rows[0];
+
+    if (caja.estado === "RETIRADO") {
+      await client.query("ROLLBACK");
+      return res.status(400).json({ error: "La caja ya fue retirada" });
+    }
+
+    // Marcar como retirada
+    await client.query(
+      `UPDATE cajas 
+       SET estado = 'RETIRADO' 
+       WHERE codigo_unico = $1`,
+      [codigo_unico],
+    );
+
+    // Registrar movimiento
+    await client.query(
+      `INSERT INTO movimientos (tipo, codigo_color, cantidad, id_almacen)
+       VALUES ('SALIDA', $1, 1, $2)`,
+      [caja.codigo_color, caja.id_almacen],
+    );
+
+    await client.query("COMMIT");
+
+    res.json({
+      mensaje: "Salida registrada correctamente",
+      caja,
+    });
+  } catch (error) {
+    await client.query("ROLLBACK");
+    next(error);
+  } finally {
+    client.release();
+  }
+};
+
+const salidaMultipleQR = async (req, res, next) => {
+  const client = await pool.connect();
+
+  try {
+    const { codigos_unicos } = req.body;
+
+    if (!Array.isArray(codigos_unicos) || codigos_unicos.length === 0) {
+      return res.status(400).json({ error: "Lista de codigos requerida" });
+    }
+
+    await client.query("BEGIN");
+
+    const resultados = [];
+    const errores = [];
+
+    for (const codigo of codigos_unicos) {
+      const result = await client.query(
+        `SELECT * FROM cajas WHERE codigo_unico = $1`,
+        [codigo],
+      );
+
+      if (result.rows.length === 0) {
+        errores.push({ codigo, error: "No encontrada" });
+        continue;
+      }
+
+      const caja = result.rows[0];
+
+      if (caja.estado === "RETIRADO") {
+        errores.push({ codigo, error: "Ya retirada" });
+        continue;
+      }
+
+      // Actualizar estado
+      await client.query(
+        `UPDATE cajas SET estado = 'RETIRADO' WHERE codigo_unico = $1`,
+        [codigo],
+      );
+
+      // Registrar movimiento
+      await client.query(
+        `INSERT INTO movimientos (tipo, codigo_color, cantidad, id_almacen)
+         VALUES ('SALIDA', $1, 1, $2)`,
+        [caja.codigo_color, caja.id_almacen],
+      );
+
+      resultados.push(codigo);
+    }
+
+    await client.query("COMMIT");
+
+    res.json({
+      mensaje: "Proceso completado",
+      retiradas: resultados,
+      errores,
+    });
+  } catch (error) {
+    await client.query("ROLLBACK");
+    next(error);
+  } finally {
+    client.release();
+  }
+};
+
 module.exports = {
   registrarEntrada,
   registrarSalida,
   inventarioResumen,
   buscarCajas,
   historialMovimientos,
+  escanearQR,
+  salidaPorQR,
+  salidaMultipleQR,
 };
