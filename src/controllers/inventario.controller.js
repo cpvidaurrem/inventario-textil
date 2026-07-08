@@ -32,13 +32,14 @@ const registrarEntrada = async (req, res, next) => {
         codigo_unico: caja.codigo_unico,
         qr: qrImage,
       });
-    }
 
-    await client.query(
-      `INSERT INTO movimientos (tipo, codigo_color, cantidad, id_almacen)
-       VALUES ('ENTRADA', $1, $2, $3)`,
-      [codigo_color, cantidad, id_almacen],
-    );
+      // Registrar el movimiento de ESTA caja específica
+      await client.query(
+        `INSERT INTO movimientos (tipo, codigo_color, cantidad, id_almacen, caja_id)
+         VALUES ('ENTRADA', $1, 1, $2, $3)`,
+        [codigo_color, id_almacen, caja.id],
+      );
+    }
 
     await client.query("COMMIT");
 
@@ -63,7 +64,7 @@ const registrarSalida = async (req, res, next) => {
 
     await client.query("BEGIN");
 
-    // 🔍 Buscar cajas SOLO del almacén seleccionado
+    // Buscar cajas SOLO del almacén seleccionado
     const cajas = await client.query(
       `SELECT id FROM cajas 
        WHERE codigo_color = $1 
@@ -79,7 +80,7 @@ const registrarSalida = async (req, res, next) => {
       });
     }
 
-    // 🔄 Marcar cajas como retiradas
+    // Marcar cajas como retiradas y registrar el movimiento de cada una
     for (let caja of cajas.rows) {
       await client.query(
         `UPDATE cajas 
@@ -87,14 +88,13 @@ const registrarSalida = async (req, res, next) => {
          WHERE id = $1`,
         [caja.id],
       );
-    }
 
-    // Registrar movimiento CON almacén
-    await client.query(
-      `INSERT INTO movimientos (tipo, codigo_color, cantidad, id_almacen)
-       VALUES ('SALIDA', $1, $2, $3)`,
-      [codigo_color, cantidad, id_almacen],
-    );
+      await client.query(
+        `INSERT INTO movimientos (tipo, codigo_color, cantidad, id_almacen, caja_id)
+         VALUES ('SALIDA', $1, 1, $2, $3)`,
+        [codigo_color, id_almacen, caja.id],
+      );
+    }
 
     await client.query("COMMIT");
 
@@ -110,7 +110,9 @@ const registrarSalida = async (req, res, next) => {
 // INVENTARIO
 const inventarioResumen = async (req, res, next) => {
   try {
-    const result = await pool.query(`
+    const { almacen, color } = req.query;
+
+    let query = `
       SELECT 
         codigo_color,
         color,
@@ -118,11 +120,51 @@ const inventarioResumen = async (req, res, next) => {
         COUNT(*) as total
       FROM cajas
       WHERE estado = 'DISPONIBLE'
-      GROUP BY codigo_color, color, id_almacen
-      ORDER BY color
-    `);
+    `;
+
+    const values = [];
+
+    if (almacen) {
+      values.push(almacen);
+      query += ` AND id_almacen = $${values.length}`;
+    }
+
+    if (color) {
+      values.push(color);
+      query += ` AND color = $${values.length}`;
+    }
+
+    query += ` GROUP BY codigo_color, color, id_almacen ORDER BY color`;
+
+    const result = await pool.query(query, values);
 
     res.json(result.rows);
+  } catch (error) {
+    next(error);
+  }
+};
+
+// LISTAR ALMACENES (para poblar selects de filtro)
+const listarAlmacenes = async (req, res, next) => {
+  try {
+    const result = await pool.query(
+      `SELECT id, nombre FROM almacenes ORDER BY id`,
+    );
+
+    res.json(result.rows);
+  } catch (error) {
+    next(error);
+  }
+};
+
+// LISTAR COLORES DISTINTOS CON STOCK DISPONIBLE (para poblar select de filtro)
+const listarColores = async (req, res, next) => {
+  try {
+    const result = await pool.query(
+      `SELECT DISTINCT color FROM cajas WHERE estado = 'DISPONIBLE' ORDER BY color`,
+    );
+
+    res.json(result.rows.map((row) => row.color));
   } catch (error) {
     next(error);
   }
@@ -163,7 +205,9 @@ const buscarCajas = async (req, res, next) => {
 // HISTORIAL (MEJORADO)
 const historialMovimientos = async (req, res, next) => {
   try {
-    const result = await pool.query(`
+    const { almacen, fecha } = req.query;
+
+    let query = `
       SELECT 
         m.id,
         m.tipo,
@@ -173,8 +217,24 @@ const historialMovimientos = async (req, res, next) => {
         a.nombre AS almacen
       FROM movimientos m
       LEFT JOIN almacenes a ON m.id_almacen = a.id
-      ORDER BY m.fecha DESC
-    `);
+      WHERE 1=1
+    `;
+
+    const values = [];
+
+    if (almacen) {
+      values.push(almacen);
+      query += ` AND m.id_almacen = $${values.length}`;
+    }
+
+    if (fecha) {
+      values.push(fecha);
+      query += ` AND DATE(m.fecha) = $${values.length}`;
+    }
+
+    query += ` ORDER BY m.fecha DESC`;
+
+    const result = await pool.query(query, values);
 
     res.json(result.rows);
   } catch (error) {
@@ -254,9 +314,9 @@ const salidaPorQR = async (req, res, next) => {
 
     // Registrar movimiento
     await client.query(
-      `INSERT INTO movimientos (tipo, codigo_color, cantidad, id_almacen)
-       VALUES ('SALIDA', $1, 1, $2)`,
-      [caja.codigo_color, caja.id_almacen],
+      `INSERT INTO movimientos (tipo, codigo_color, cantidad, id_almacen, caja_id)
+       VALUES ('SALIDA', $1, 1, $2, $3)`,
+      [caja.codigo_color, caja.id_almacen, caja.id],
     );
 
     await client.query("COMMIT");
@@ -288,9 +348,6 @@ const salidaMultipleQR = async (req, res, next) => {
     const resultados = [];
     const errores = [];
 
-    // 🔥 NUEVO: acumulador de salidas
-    const resumenSalida = {};
-
     for (let codigo of codigos_unicos) {
       codigo = codigo.trim(); // (extra seguridad)
 
@@ -306,7 +363,7 @@ const salidaMultipleQR = async (req, res, next) => {
 
       const caja = result.rows[0];
 
-      // 🔴 VALIDACIÓN
+      // VALIDACIÓN
       if (caja.estado !== "DISPONIBLE") {
         errores.push({
           codigo,
@@ -315,34 +372,20 @@ const salidaMultipleQR = async (req, res, next) => {
         continue;
       }
 
-      // ✅ Actualizar estado
+      // Actualizar estado
       await client.query(
         `UPDATE cajas SET estado = 'RETIRADO' WHERE codigo_unico = $1`,
         [codigo],
       );
 
-      // 🔥 ACUMULAR EN VEZ DE INSERTAR
-      if (!resumenSalida[caja.codigo_color]) {
-        resumenSalida[caja.codigo_color] = {
-          cantidad: 0,
-          id_almacen: caja.id_almacen,
-        };
-      }
-
-      resumenSalida[caja.codigo_color].cantidad += 1;
+      // Registrar el movimiento de ESTA caja específica
+      await client.query(
+        `INSERT INTO movimientos (tipo, codigo_color, cantidad, id_almacen, caja_id)
+         VALUES ('SALIDA', $1, 1, $2, $3)`,
+        [caja.codigo_color, caja.id_almacen, caja.id],
+      );
 
       resultados.push(codigo);
-    }
-
-    // 🔥 INSERT FINAL AGRUPADO
-    for (const codigo_color in resumenSalida) {
-      const { cantidad, id_almacen } = resumenSalida[codigo_color];
-
-      await client.query(
-        `INSERT INTO movimientos (tipo, codigo_color, cantidad, id_almacen)
-         VALUES ('SALIDA', $1, $2, $3)`,
-        [codigo_color, cantidad, id_almacen],
-      );
     }
 
     await client.query("COMMIT");
@@ -369,4 +412,6 @@ module.exports = {
   escanearQR,
   salidaPorQR,
   salidaMultipleQR,
+  listarAlmacenes,
+  listarColores,
 };

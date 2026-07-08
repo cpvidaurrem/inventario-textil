@@ -8,6 +8,8 @@ const {
   escanearQR,
   salidaPorQR,
   salidaMultipleQR,
+  listarAlmacenes,
+  listarColores,
 } = require("../controllers/inventario.controller");
 
 const router = Router();
@@ -21,5 +23,7 @@ router.get("/historial", historialMovimientos);
 router.post("/escanear", escanearQR);
 router.post("/salida-qr", salidaPorQR);
 router.post("/salida-multiple-qr", salidaMultipleQR);
+router.get("/almacenes", listarAlmacenes);
+router.get("/colores", listarColores);
 
 module.exports = router;
