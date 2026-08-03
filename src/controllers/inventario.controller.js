@@ -7,7 +7,7 @@ const registrarEntrada = async (req, res, next) => {
   const client = await pool.connect();
 
   try {
-    const { codigo_color, color, cantidad, id_almacen } = req.body;
+    const { codigo_color, color, cantidad, id_almacen, descripcion } = req.body;
 
     await client.query("BEGIN");
     let qrCodes = [];
@@ -16,10 +16,10 @@ const registrarEntrada = async (req, res, next) => {
       const codigo_unico = uuidv4(); // Generar un código único para cada caja
 
       const result = await client.query(
-        `INSERT INTO cajas (codigo_color, color, id_almacen, codigo_unico)
-         VALUES ($1, $2, $3, $4)
+        `INSERT INTO cajas (codigo_color, color, id_almacen, codigo_unico, descripcion)
+         VALUES ($1, $2, $3, $4, $5)
          RETURNING id, codigo_unico`,
-        [codigo_color, color, id_almacen, codigo_unico],
+        [codigo_color, color, id_almacen, codigo_unico, descripcion || null],
       );
 
       const caja = result.rows[0];
@@ -31,13 +31,14 @@ const registrarEntrada = async (req, res, next) => {
         id: caja.id,
         codigo_unico: caja.codigo_unico,
         qr: qrImage,
+        descripcion: descripcion || null,
       });
 
       // Registrar el movimiento de ESTA caja específica
       await client.query(
-        `INSERT INTO movimientos (tipo, codigo_color, cantidad, id_almacen, caja_id)
-         VALUES ('ENTRADA', $1, 1, $2, $3)`,
-        [codigo_color, id_almacen, caja.id],
+        `INSERT INTO movimientos (tipo, codigo_color, cantidad, id_almacen, caja_id, usuario_id)
+         VALUES ('ENTRADA', $1, 1, $2, $3, $4)`,
+        [codigo_color, id_almacen, caja.id, req.usuario.id],
       );
     }
 
@@ -90,9 +91,9 @@ const registrarSalida = async (req, res, next) => {
       );
 
       await client.query(
-        `INSERT INTO movimientos (tipo, codigo_color, cantidad, id_almacen, caja_id)
-         VALUES ('SALIDA', $1, 1, $2, $3)`,
-        [codigo_color, id_almacen, caja.id],
+        `INSERT INTO movimientos (tipo, codigo_color, cantidad, id_almacen, caja_id, usuario_id)
+         VALUES ('SALIDA', $1, 1, $2, $3, $4)`,
+        [codigo_color, id_almacen, caja.id, req.usuario.id],
       );
     }
 
@@ -214,9 +215,13 @@ const historialMovimientos = async (req, res, next) => {
         m.codigo_color,
         m.cantidad,
         m.fecha,
-        a.nombre AS almacen
+        a.nombre AS almacen,
+        c.descripcion,
+        u.nombre_completo AS usuario
       FROM movimientos m
       LEFT JOIN almacenes a ON m.id_almacen = a.id
+      LEFT JOIN cajas c ON m.caja_id = c.id
+      LEFT JOIN usuarios u ON m.usuario_id = u.id
       WHERE 1=1
     `;
 
@@ -257,6 +262,7 @@ const escanearQR = async (req, res, next) => {
         c.color,
         c.estado,
         c.codigo_unico,
+        c.descripcion,
         a.nombre AS almacen
       FROM cajas c
       LEFT JOIN almacenes a ON c.id_almacen = a.id
@@ -314,11 +320,10 @@ const salidaPorQR = async (req, res, next) => {
 
     // Registrar movimiento
     await client.query(
-      `INSERT INTO movimientos (tipo, codigo_color, cantidad, id_almacen, caja_id)
-       VALUES ('SALIDA', $1, 1, $2, $3)`,
-      [caja.codigo_color, caja.id_almacen, caja.id],
+      `INSERT INTO movimientos (tipo, codigo_color, cantidad, id_almacen, caja_id, usuario_id)
+       VALUES ('SALIDA', $1, 1, $2, $3, $4)`,
+      [caja.codigo_color, caja.id_almacen, caja.id, req.usuario.id],
     );
-
     await client.query("COMMIT");
 
     res.json({
@@ -380,9 +385,9 @@ const salidaMultipleQR = async (req, res, next) => {
 
       // Registrar el movimiento de ESTA caja específica
       await client.query(
-        `INSERT INTO movimientos (tipo, codigo_color, cantidad, id_almacen, caja_id)
-         VALUES ('SALIDA', $1, 1, $2, $3)`,
-        [caja.codigo_color, caja.id_almacen, caja.id],
+        `INSERT INTO movimientos (tipo, codigo_color, cantidad, id_almacen, caja_id, usuario_id)
+         VALUES ('SALIDA', $1, 1, $2, $3, $4)`,
+        [caja.codigo_color, caja.id_almacen, caja.id, req.usuario.id],
       );
 
       resultados.push(codigo);
